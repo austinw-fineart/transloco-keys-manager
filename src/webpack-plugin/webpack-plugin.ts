@@ -1,17 +1,13 @@
-import { buildTranslationFiles } from '../keys-builder';
-import { buildTranslationFile } from '../keys-builder/build-translation-file';
-import { extractTemplateKeys } from '../keys-builder/template';
-import { extractTSKeys } from '../keys-builder/typescript';
+import { relative, sep } from 'node:path';
+import { templateExtractor } from '../keys-builder/template';
+import { TSExtractor } from '../keys-builder/typescript';
 import { Config, ScopeMap, FileType } from '../types';
+import { writeFile } from '../utils/file.utils';
 import { initExtraction } from '../utils/init-extraction';
 import { mergeDeep } from '../utils/object.utils';
-import { buildScopeFilePaths } from '../utils/path.utils';
 import { resolveConfig } from '../utils/resolve-config';
-import { updateScopesMap } from '../utils/update-scopes-map';
 
 import { generateKeys } from './generate-keys';
-
-let init = true;
 
 export class TranslocoExtractKeysWebpackPlugin {
   config: Config;
@@ -21,82 +17,83 @@ export class TranslocoExtractKeysWebpackPlugin {
   }
 
   apply(compiler: any) {
-    compiler.hooks.watchRun.tapPromise(
+    compiler.hooks.thisCompilation.tap(
       'TranslocoExtractKeysPlugin',
-      async (comp: any) => {
-        if (init) {
-          init = false;
-          return buildTranslationFiles(this.config);
-        }
+      (comp: any) => {
+        comp.hooks.processAssets.tap(
+          {
+            name: 'TranslocoExtractKeysPlugin',
+            stage: compiler.webpack.Compilation.PROCESS_ASSETS_STAGE_ADDITIONAL,
+          },
+          () => {
+            let htmlResult = initExtraction();
+            let tsResult = initExtraction();
+            const files = compiler.modifiedFiles || comp.fileDependencies;
 
-        const keysExtractions: Record<FileType, string[]> = {
-          html: [],
-          ts: [],
-        };
-        const files =
-          comp.modifiedFiles ||
-          Object.keys(comp.watchFileSystem.watcher.mtimes);
+            for (const file of files) {
+              if (
+                !this.config.input.some((input) => file.startsWith(input + sep))
+              ) {
+                continue;
+              }
 
-        for (const file of files) {
-          const fileType = resolveFileType(file);
+              const fileType = resolveFileType(file);
 
-          if (fileType) {
-            keysExtractions[fileType].push(file);
-          }
-        }
+              switch (fileType) {
+                case 'html': {
+                  htmlResult.scopeToKeys = templateExtractor({
+                    defaultValue: this.config.defaultValue,
+                    file,
+                    scopes: this.config.scopes,
+                    scopeToKeys: htmlResult.scopeToKeys,
+                  });
+                }
+                case 'ts': {
+                  tsResult.scopeToKeys = TSExtractor({
+                    defaultValue: this.config.defaultValue,
+                    file,
+                    scopes: this.config.scopes,
+                    scopeToKeys: tsResult.scopeToKeys,
+                  });
+                }
+              }
+            }
 
-        if (keysExtractions.html.length || keysExtractions.ts.length) {
-          let htmlResult = initExtraction();
-          let tsResult = initExtraction();
-          if (keysExtractions.ts.length) {
-            // Maybe someone added a TRANSLOCO_SCOPE
-            const newScopes = updateScopesMap({ files: keysExtractions.ts });
-
-            const paths = buildScopeFilePaths({
-              aliasToScope: newScopes,
-              langs: this.config.langs,
-              output: this.config.output,
-              fileFormat: this.config.fileFormat,
-            });
-
-            paths.forEach(({ path }) =>
-              buildTranslationFile({
-                path,
-                fileFormat: this.config.fileFormat,
-              }),
+            const scopeToKeys = mergeDeep(
+              {},
+              htmlResult.scopeToKeys,
+              tsResult.scopeToKeys,
+            ) as ScopeMap;
+            const hasTranslateKeys = Object.keys(scopeToKeys).some(
+              (key) => Object.keys(scopeToKeys[key]).length > 0,
             );
-            tsResult = extractTSKeys({
-              ...this.config,
-              files: keysExtractions.ts,
-            });
-          }
 
-          if (keysExtractions.html.length) {
-            htmlResult = extractTemplateKeys({
-              ...this.config,
-              files: keysExtractions.html,
-            });
-          }
+            if (hasTranslateKeys) {
+              const files = generateKeys({
+                config: this.config,
+                translationPath: this.config.translationsPath,
+                scopeToKeys,
+              });
 
-          const scopeToKeys = mergeDeep(
-            {},
-            htmlResult.scopeToKeys,
-            tsResult.scopeToKeys,
-          ) as ScopeMap;
-          const hasTranslateKeys = Object.keys(scopeToKeys).some(
-            (key) => Object.keys(scopeToKeys[key]).length > 0,
-          );
+              for (const { filePath, content } of files) {
+                writeFile(filePath, content, true);
 
-          if (hasTranslateKeys) {
-            generateKeys({
-              config: this.config,
-              translationPath: this.config.translationsPath,
-              scopeToKeys,
-            });
-          }
-        }
-
-        return Promise.resolve();
+                for (const [name, info] of comp.assetsInfo) {
+                  if (
+                    info.sourceFilename &&
+                    relative(info.sourceFilename, filePath) === ''
+                  ) {
+                    comp.updateAsset(
+                      name,
+                      new compiler.webpack.sources.RawSource(content),
+                    );
+                    break;
+                  }
+                }
+              }
+            }
+          },
+        );
       },
     );
   }

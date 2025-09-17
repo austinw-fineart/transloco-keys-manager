@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from 'fs';
+import { readFileSync, statSync, utimesSync, writeFileSync } from 'fs';
 
 import { stringify } from './object.utils';
 
@@ -21,6 +21,16 @@ export function readFile(
   return content;
 }
 
-export function writeFile(fileName: string, content: object) {
+export function writeFile(
+  fileName: string,
+  content: object,
+  preserve: boolean = false,
+) {
+  const stats = preserve
+    ? statSync(fileName, { throwIfNoEntry: false })
+    : undefined;
   writeFileSync(fileName, stringify(content), { encoding: 'utf-8' });
+  if (stats) {
+    utimesSync(fileName, stats.atime, stats.mtime);
+  }
 }
